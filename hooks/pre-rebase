@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""
+hooks/pre-rebase — Runs before `git rebase`.
+
+Blocks:
+  - Rebasing the protected branch itself (it is managed by `gt merge`)
+
+Warns (does not block):
+  - Rebasing onto an unexpected base
+
+git passes two arguments:
+  $1  upstream branch the rebase applies changes against
+  $2  branch being rebased (empty = current branch)
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+
+def _cfg(key: str) -> str | None:
+    r = _run(["git", "config", "--local", f"gt.{key}"])
+    v = r.stdout.strip()
+    return v if r.returncode == 0 and v else None
+
+
+def main() -> int:
+    protected = _cfg("protected-branch")
+    develop   = _cfg("develop-branch")
+    remote    = _cfg("remote") or "origin"
+
+    if not protected:
+        return 0  # not configured
+
+    upstream   = sys.argv[1] if len(sys.argv) > 1 else ""
+    branch_arg = sys.argv[2] if len(sys.argv) > 2 else ""
+
+    branch = branch_arg or _run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+    ).stdout.strip()
+
+    if branch == protected:
+        print(
+            f"\n✖  Rebasing '{protected}' directly is not allowed.\n"
+            f"   '{protected}' is managed exclusively by:  gt merge\n",
+            file=sys.stderr,
+        )
+        return 1
+
+    if upstream:
+        allowed = {f"{remote}/{protected}", protected}
+        if develop:
+            allowed |= {f"{remote}/{develop}", develop}
+        if upstream not in allowed:
+            print(
+                f"\n⚠   Rebasing onto '{upstream}' is not a standard base.\n"
+                f"    Expected one of: {', '.join(sorted(allowed))}\n"
+                f"    Proceed only if you know what you are doing.\n",
+                file=sys.stderr,
+            )
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

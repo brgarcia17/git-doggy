@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""
+hooks/pre-commit — Runs before every commit.
+
+Blocks:
+  - Files containing git conflict markers (<<<<<<<, =======, >>>>>>>)
+  - Filenames that look like secrets (.env, id_rsa, credentials.json, etc.)
+
+Use  git commit --no-verify  to bypass in exceptional cases.
+"""
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+
+CONFLICT_MARKERS = ["<<<<<<<", "=======", ">>>>>>>"]
+
+BLOCKED_NAMES = [
+    r"\.env$",
+    r"\.env\.(local|prod|production|staging)$",
+    r"secrets?\.(json|yaml|yml|txt)$",
+    r"credentials?\.(json|yaml|yml)$",
+    r"private[_-]?key",
+    r"id_rsa$",
+    r"id_ed25519$",
+]
+
+SKIP_CONTENT = {
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp",
+    ".pdf", ".zip", ".tar", ".gz", ".whl",
+    ".pyc", ".db", ".sqlite", ".sqlite3",
+}
+
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+
+def staged_files() -> list[str]:
+    r = _run(["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"])
+    return [f.strip() for f in r.stdout.splitlines() if f.strip()]
+
+
+def check_conflict_markers(files: list[str]) -> list[str]:
+    issues = []
+    for path in files:
+        ext = ("." + path.rsplit(".", 1)[-1]) if "." in path else ""
+        if ext.lower() in SKIP_CONTENT:
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                for lineno, line in enumerate(fh, 1):
+                    if any(line.startswith(m) for m in CONFLICT_MARKERS):
+                        issues.append(f"  {path}:{lineno}  →  {line.rstrip()}")
+                        break
+        except OSError:
+            pass
+    return issues
+
+
+def check_blocked_names(files: list[str]) -> list[str]:
+    patterns = [re.compile(p, re.IGNORECASE) for p in BLOCKED_NAMES]
+    issues = []
+    for path in files:
+        name = path.split("/")[-1]
+        for pat in patterns:
+            if pat.search(name):
+                issues.append(f"  {path}  (matches: {pat.pattern})")
+                break
+    return issues
+
+
+def main() -> int:
+    staged = staged_files()
+    if not staged:
+        return 0
+
+    errors: list[str] = []
+
+    marker_issues = check_conflict_markers(staged)
+    if marker_issues:
+        errors.append("Conflict markers found in staged files:")
+        errors.extend(marker_issues)
+
+    name_issues = check_blocked_names(staged)
+    if name_issues:
+        errors.append("Potentially sensitive files staged:")
+        errors.extend(name_issues)
+        errors.append("  Use  git commit --no-verify  if this is intentional.")
+
+    if errors:
+        print("\n✖  pre-commit blocked this commit:\n", file=sys.stderr)
+        for line in errors:
+            print(f"   {line}", file=sys.stderr)
+        print(file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

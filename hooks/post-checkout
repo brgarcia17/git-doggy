@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""
+hooks/post-checkout — Runs after `git checkout` / `git switch`.
+
+Informational only — never blocks.
+
+Warns when:
+  - You switch directly to the protected branch
+  - Your branch is behind origin/<protected>
+
+git passes three arguments:
+  $1  previous HEAD
+  $2  new HEAD
+  $3  1 = branch checkout, 0 = file checkout
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+
+def _cfg(key: str) -> str | None:
+    r = _run(["git", "config", "--local", f"gt.{key}"])
+    v = r.stdout.strip()
+    return v if r.returncode == 0 and v else None
+
+
+def main() -> int:
+    if len(sys.argv) < 4 or sys.argv[3] != "1":
+        return 0  # file checkout — nothing to do
+
+    protected = _cfg("protected-branch")
+    remote    = _cfg("remote") or "origin"
+
+    if not protected:
+        return 0  # not configured
+
+    branch_r = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    branch   = branch_r.stdout.strip()
+
+    if branch == protected:
+        print(
+            f"\n⚠   You are on '{protected}' (the protected branch).\n"
+            f"    Never commit or push here directly.\n"
+            f"    Use:  gt merge\n",
+            file=sys.stderr,
+        )
+        return 0
+
+    try:
+        r = _run([
+            "git", "rev-list", "--left-right", "--count",
+            f"{remote}/{protected}...{branch}",
+        ])
+        parts = r.stdout.strip().split()
+        if len(parts) == 2 and int(parts[0]) > 0:
+            print(
+                f"\n→   '{branch}' is {parts[0]} commit(s) behind "
+                f"'{remote}/{protected}'.\n"
+                f"    Consider running:  gt sync\n",
+                file=sys.stderr,
+            )
+    except Exception:
+        pass
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
