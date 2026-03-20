@@ -510,6 +510,356 @@ def _(verbose):
         repo.cleanup()
 
 
+@test("watcher_has_conflict_markers")
+def _(verbose):
+    """has_conflict_markers correctly detects presence/absence of markers."""
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="gt-test-watcher-"))
+    try:
+        # File with markers
+        marked = tmp / "conflict.txt"
+        marked.write_text("before\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\nafter\n")
+
+        # File without markers
+        clean = tmp / "clean.txt"
+        clean.write_text("just normal content\n")
+
+        # File with partial marker (not at line start — should still detect)
+        partial = tmp / "partial.txt"
+        partial.write_text("some text <<<<<<< not a real marker\n")
+
+        sys.path.insert(0, str(GT_ROOT))
+        from _core.watcher import has_conflict_markers, count_conflict_markers
+
+        if not has_conflict_markers(str(marked)):
+            raise Fail("Should detect conflict markers in marked file")
+        if has_conflict_markers(str(clean)):
+            raise Fail("Should NOT detect markers in clean file")
+        # partial has <<<<<<< embedded in a line — our check uses b"<<<<<<< " which matches substrings in chunks
+        # The marker is present as a substring, so it should be detected
+        if not has_conflict_markers(str(partial)):
+            raise Fail("Should detect marker substring in partial file")
+
+        count = count_conflict_markers(str(marked))
+        if count != 1:
+            raise Fail(f"Expected 1 conflict block, got {count}")
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(tmp, ignore_errors=True)
+
+
+@test("watcher_count_multiple_conflicts")
+def _(verbose):
+    """count_conflict_markers counts multiple conflict blocks correctly."""
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="gt-test-count-"))
+    try:
+        multi = tmp / "multi.txt"
+        multi.write_text(
+            "<<<<<<< HEAD\na\n=======\nb\n>>>>>>> br\n"
+            "middle\n"
+            "<<<<<<< HEAD\nc\n=======\nd\n>>>>>>> br\n"
+            "end\n"
+            "<<<<<<< HEAD\ne\n=======\nf\n>>>>>>> br\n"
+        )
+        sys.path.insert(0, str(GT_ROOT))
+        from _core.watcher import count_conflict_markers
+
+        count = count_conflict_markers(str(multi))
+        if count != 3:
+            raise Fail(f"Expected 3 conflict blocks, got {count}")
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(tmp, ignore_errors=True)
+
+
+@test("watcher_polling_detects_resolve")
+def _(verbose):
+    """ConflictWatcher detects when markers are removed from a file."""
+    import tempfile, time, threading
+    tmp = Path(tempfile.mkdtemp(prefix="gt-test-poll-"))
+    try:
+        conflict_file = tmp / "f.txt"
+        conflict_file.write_text("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> br\n")
+
+        sys.path.insert(0, str(GT_ROOT))
+        from _core.watcher import ConflictWatcher
+
+        resolved_event = threading.Event()
+        still_conflicted_event = threading.Event()
+
+        def on_resolved(fp):
+            resolved_event.set()
+
+        def on_still_conflicted(fp):
+            still_conflicted_event.set()
+
+        watcher = ConflictWatcher(poll_interval=0.1)
+        watcher.start(on_resolved=on_resolved, on_still_conflicted=on_still_conflicted)
+        watcher.add_file(str(conflict_file))
+
+        # Simulate IDE save — remove markers
+        time.sleep(0.2)
+        conflict_file.write_text("resolved content\n")
+
+        # Wait for watcher to detect
+        if not resolved_event.wait(timeout=3.0):
+            watcher.stop()
+            raise Fail("Watcher did not detect file resolution within 3 seconds")
+
+        watcher.stop()
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(tmp, ignore_errors=True)
+
+
+@test("watcher_polling_detects_still_conflicted")
+def _(verbose):
+    """ConflictWatcher detects when file is saved but still has markers."""
+    import tempfile, time, threading
+    tmp = Path(tempfile.mkdtemp(prefix="gt-test-poll2-"))
+    try:
+        conflict_file = tmp / "f.txt"
+        conflict_file.write_text("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> br\n")
+
+        sys.path.insert(0, str(GT_ROOT))
+        from _core.watcher import ConflictWatcher
+
+        still_event = threading.Event()
+
+        def on_resolved(fp):
+            pass
+
+        def on_still(fp):
+            still_event.set()
+
+        watcher = ConflictWatcher(poll_interval=0.1)
+        watcher.start(on_resolved=on_resolved, on_still_conflicted=on_still)
+        watcher.add_file(str(conflict_file))
+
+        # Save but keep markers (user partially edited)
+        time.sleep(0.2)
+        conflict_file.write_text("edited\n<<<<<<< HEAD\nstill\n=======\nhere\n>>>>>>> br\n")
+
+        if not still_event.wait(timeout=3.0):
+            watcher.stop()
+            raise Fail("Watcher did not detect still-conflicted state within 3 seconds")
+
+        watcher.stop()
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(tmp, ignore_errors=True)
+
+
+@test("sync_conflict_resolution_theirs")
+def _(verbose):
+    """gt sync with conflicts: resolved via theirs (non-interactive, simulated)."""
+    repo = Repo()
+    try:
+        dev = repo.clone("dev")
+        repo.bootstrap(dev, "pre-release", "demo/dev")
+
+        # Create a conflict: both branches modify the same file
+        git(["checkout", "-q", "pre-release"], cwd=dev)
+        (dev / "shared.txt").write_text("protected version\n")
+        git(["add", "."], cwd=dev)
+        git(["commit", "-q", "-m", "fix: protected change"], cwd=dev)
+        git(["push", "-q", "origin", "pre-release"], cwd=dev)
+
+        git(["checkout", "-q", "demo/dev"], cwd=dev)
+        (dev / "shared.txt").write_text("developer version\n")
+        git(["add", "."], cwd=dev)
+        git(["commit", "-q", "-m", "feat: dev change"], cwd=dev)
+        git(["push", "-q", "origin", "demo/dev"], cwd=dev)
+
+        init_gt(cwd=dev, develop="demo/dev", protected="pre-release", verbose=verbose)
+
+        # Manually trigger the rebase + resolve theirs
+        # Since the TUI is interactive (curses), we test the underlying
+        # git operations directly
+        git(["fetch", "origin"], cwd=dev)
+        r = git(["rebase", "origin/pre-release"], cwd=dev)
+        if r.returncode == 0:
+            raise Fail("Expected rebase conflict but got clean rebase")
+
+        # Verify conflict exists
+        diff_r = git(["diff", "--name-only", "--diff-filter=U"], cwd=dev)
+        assert_in("shared.txt", diff_r.stdout, label="conflicted files")
+
+        # Resolve with theirs
+        git(["checkout", "--theirs", "--", "shared.txt"], cwd=dev)
+        git(["add", "--", "shared.txt"], cwd=dev)
+        r2 = run(["git", "-c", "core.editor=true", "rebase", "--continue"], cwd=dev)
+        assert_ok(r2, label="rebase continue after theirs")
+
+        content = (dev / "shared.txt").read_text()
+        # During rebase, --theirs = the branch being rebased (developer)
+        if "developer version" not in content:
+            raise Fail(f"Expected theirs (developer) content, got: {content!r}")
+    finally:
+        repo.cleanup()
+
+
+@test("sync_conflict_resolution_ours")
+def _(verbose):
+    """gt sync with conflicts: resolved via ours."""
+    repo = Repo()
+    try:
+        dev = repo.clone("dev")
+        repo.bootstrap(dev, "pre-release", "demo/dev")
+
+        git(["checkout", "-q", "pre-release"], cwd=dev)
+        (dev / "shared.txt").write_text("protected version\n")
+        git(["add", "."], cwd=dev)
+        git(["commit", "-q", "-m", "fix: protected change"], cwd=dev)
+        git(["push", "-q", "origin", "pre-release"], cwd=dev)
+
+        git(["checkout", "-q", "demo/dev"], cwd=dev)
+        (dev / "shared.txt").write_text("developer version\n")
+        git(["add", "."], cwd=dev)
+        git(["commit", "-q", "-m", "feat: dev change"], cwd=dev)
+        git(["push", "-q", "origin", "demo/dev"], cwd=dev)
+
+        init_gt(cwd=dev, develop="demo/dev", protected="pre-release", verbose=verbose)
+
+        git(["fetch", "origin"], cwd=dev)
+        r = git(["rebase", "origin/pre-release"], cwd=dev)
+        if r.returncode == 0:
+            raise Fail("Expected rebase conflict but got clean rebase")
+
+        # Resolve with ours
+        git(["checkout", "--ours", "--", "shared.txt"], cwd=dev)
+        git(["add", "--", "shared.txt"], cwd=dev)
+        r2 = run(["git", "-c", "core.editor=true", "rebase", "--continue"], cwd=dev)
+        assert_ok(r2, label="rebase continue after ours")
+
+        content = (dev / "shared.txt").read_text()
+        # During rebase, --ours = the upstream (protected branch)
+        if "protected version" not in content:
+            raise Fail(f"Expected ours (protected) content, got: {content!r}")
+    finally:
+        repo.cleanup()
+
+
+@test("sync_conflict_manual_resolution")
+def _(verbose):
+    """Manual conflict resolution: edit file to remove markers, then continue."""
+    repo = Repo()
+    try:
+        dev = repo.clone("dev")
+        repo.bootstrap(dev, "pre-release", "demo/dev")
+
+        git(["checkout", "-q", "pre-release"], cwd=dev)
+        (dev / "shared.txt").write_text("protected version\n")
+        git(["add", "."], cwd=dev)
+        git(["commit", "-q", "-m", "fix: protected change"], cwd=dev)
+        git(["push", "-q", "origin", "pre-release"], cwd=dev)
+
+        git(["checkout", "-q", "demo/dev"], cwd=dev)
+        (dev / "shared.txt").write_text("developer version\n")
+        git(["add", "."], cwd=dev)
+        git(["commit", "-q", "-m", "feat: dev change"], cwd=dev)
+        git(["push", "-q", "origin", "demo/dev"], cwd=dev)
+
+        init_gt(cwd=dev, develop="demo/dev", protected="pre-release", verbose=verbose)
+
+        git(["fetch", "origin"], cwd=dev)
+        git(["rebase", "origin/pre-release"], cwd=dev)
+
+        # Verify file has conflict markers
+        content = (dev / "shared.txt").read_text()
+        assert_in("<<<<<<<", content, label="conflict markers present")
+
+        # Simulate manual resolution (user edits in IDE)
+        (dev / "shared.txt").write_text("manually merged content\n")
+
+        # Verify markers are gone
+        sys.path.insert(0, str(GT_ROOT))
+        from _core.watcher import has_conflict_markers
+        if has_conflict_markers(str(dev / "shared.txt")):
+            raise Fail("Markers should be gone after manual edit")
+
+        git(["add", "--", "shared.txt"], cwd=dev)
+        r = run(["git", "-c", "core.editor=true", "rebase", "--continue"], cwd=dev)
+        assert_ok(r, label="rebase continue after manual resolution")
+
+        final = (dev / "shared.txt").read_text()
+        if "manually merged" not in final:
+            raise Fail(f"Expected manual content, got: {final!r}")
+    finally:
+        repo.cleanup()
+
+
+@test("resolver_state_machine")
+def _(verbose):
+    """ConflictFile state transitions work correctly."""
+    sys.path.insert(0, str(GT_ROOT))
+    from _core.resolver import ConflictFile, FileState
+
+    f = ConflictFile(path="test.txt", abs_path="/tmp/test.txt", conflicts=1)
+
+    # Default state
+    if f.state != FileState.PENDING:
+        raise Fail(f"Expected PENDING, got {f.state}")
+
+    # Transition to theirs
+    f.state = FileState.THEIRS
+    if f.state != FileState.THEIRS:
+        raise Fail(f"Expected THEIRS, got {f.state}")
+
+    # Transition to ours
+    f.state = FileState.OURS
+    if f.state != FileState.OURS:
+        raise Fail(f"Expected OURS, got {f.state}")
+
+    # Transition to ide_open
+    f.state = FileState.IDE_OPEN
+    if f.state != FileState.IDE_OPEN:
+        raise Fail(f"Expected IDE_OPEN, got {f.state}")
+
+    # Transition to resolved_manual
+    f.state = FileState.RESOLVED_MANUAL
+    if f.state != FileState.RESOLVED_MANUAL:
+        raise Fail(f"Expected RESOLVED_MANUAL, got {f.state}")
+
+
+@test("resolver_continue_blocked_when_unresolved")
+def _(verbose):
+    """ConflictResolverTUI._try_continue blocks when files are unresolved."""
+    sys.path.insert(0, str(GT_ROOT))
+    from _core.resolver import ConflictFile, FileState, ConflictResolverTUI
+
+    files = [
+        ConflictFile(path="a.txt", abs_path="/tmp/a.txt", conflicts=1, state=FileState.THEIRS),
+        ConflictFile(path="b.txt", abs_path="/tmp/b.txt", conflicts=2, state=FileState.PENDING),
+    ]
+    tui = ConflictResolverTUI(files, "test-branch")
+    result = tui._try_continue()
+    if result == "quit":
+        raise Fail("Should NOT allow continue when files are unresolved")
+    if not tui.message_is_error:
+        raise Fail("Should set error message when continue is blocked")
+
+
+@test("resolver_continue_allowed_when_all_resolved")
+def _(verbose):
+    """ConflictResolverTUI._try_continue allows when all files are resolved."""
+    sys.path.insert(0, str(GT_ROOT))
+    from _core.resolver import ConflictFile, FileState, ConflictResolverTUI, ResolverResult
+
+    files = [
+        ConflictFile(path="a.txt", abs_path="/tmp/a.txt", conflicts=1, state=FileState.THEIRS),
+        ConflictFile(path="b.txt", abs_path="/tmp/b.txt", conflicts=2, state=FileState.OURS),
+        ConflictFile(path="c.txt", abs_path="/tmp/c.txt", conflicts=1, state=FileState.RESOLVED_MANUAL),
+    ]
+    tui = ConflictResolverTUI(files, "test-branch")
+    result = tui._try_continue()
+    if result != "quit":
+        raise Fail("Should allow continue when all files are resolved")
+    if tui._result is None or tui._result.result != ResolverResult.CONTINUE:
+        raise Fail("Result should be CONTINUE")
+
+
 @test("uninstall_removes_everything")
 def _(verbose):
     """gt init --uninstall removes hooks and .git/config [gt] section."""

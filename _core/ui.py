@@ -34,10 +34,11 @@ class C:
     RESET  = "\033[0m"  if _COLOR else ""
     BOLD   = "\033[1m"  if _COLOR else ""
     DIM    = "\033[2m"  if _COLOR else ""
-    RED    = "\033[31m" if _COLOR else ""
-    GREEN  = "\033[32m" if _COLOR else ""
-    YELLOW = "\033[33m" if _COLOR else ""
-    CYAN   = "\033[36m" if _COLOR else ""
+    RED     = "\033[31m" if _COLOR else ""
+    GREEN   = "\033[32m" if _COLOR else ""
+    YELLOW  = "\033[33m" if _COLOR else ""
+    MAGENTA = "\033[35m" if _COLOR else ""
+    CYAN    = "\033[36m" if _COLOR else ""
 
 
 # ── Verbose flag ──────────────────────────────────────────────────────────────

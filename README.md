@@ -1,17 +1,19 @@
 # git-doggy — Safe Git Workflow CLI
 
-A zero-dependency CLI tool that automates the `develop → protected branch` workflow with built-in safety checks, merge simulation, and git hooks. Works on **Linux**, **macOS**, and **Windows**. Requires **Python 3.8+**.
+A zero-dependency CLI tool that automates the `develop → protected branch` workflow with built-in safety checks, interactive conflict resolution, merge simulation, and git hooks. Works on **Linux**, **macOS**, and **Windows**. Requires **Python 3.8+**.
 
 ---
 
 ## Features
 
 - **Automated rebase & push** — `gt sync` keeps your branch up to date with `--force-with-lease` safety.
+- **Interactive conflict resolution** — when `gt sync` hits a rebase conflict, a terminal UI lets you resolve each file with `theirs`, `ours`, or by editing directly in your IDE. No manual `git add` needed.
+- **IDE-aware file opening** — detects VS Code, Cursor, Windsurf, and JetBrains terminals automatically and opens conflicted files in the right editor.
+- **Real-time watcher** — monitors files saved in your IDE and updates resolution state automatically when conflict markers are removed.
 - **Simulated merge** — `gt merge` dry-runs before touching the protected branch.
-- **Conflict detection** — stops immediately if conflicts are found, before any damage.
 - **Git hooks** — blocks direct pushes to the protected branch, conflict markers in commits, and sensitive files.
 - **Per-repo, per-developer config** — stored in `.git/config`, never pushed to the remote.
-- **Zero dependencies** — pure Python, no pip install required.
+- **Zero dependencies** — pure Python stdlib, no `pip install` required.
 
 ---
 
@@ -106,18 +108,91 @@ gt init --repo PATH    # target a different repository
 
 ## Commands
 
-| Command                | Description                                                         |
-| ---------------------- | ------------------------------------------------------------------- |
-| `gt init`              | Run the setup wizard                                                |
-| `gt status`            | Full branch diagnostic — never modifies anything                    |
-| `gt check`             | Validate state and simulate a merge (dry run)                       |
-| `gt sync`              | Rebase onto the protected branch and push with `--force-with-lease` |
-| `gt merge`             | Integrate your branch into the protected branch (6-phase flow)      |
-| `gt configure`         | Edit your personal config interactively                             |
-| `gt configure --show`  | Display the effective configuration                                 |
-| `gt configure --reset` | Remove personal settings (requires `gt init` again)                 |
+| Command                | Description                                                       |
+| ---------------------- | ----------------------------------------------------------------- |
+| `gt init`              | Run the setup wizard                                              |
+| `gt status`            | Full branch diagnostic — never modifies anything                  |
+| `gt check`             | Validate state and simulate a merge (dry run)                     |
+| `gt sync`              | Rebase onto the protected branch, resolve any conflicts, and push |
+| `gt merge`             | Integrate your branch into the protected branch (6-phase flow)    |
+| `gt configure`         | Edit your personal config interactively                           |
+| `gt configure --show`  | Display the effective configuration                               |
+| `gt configure --reset` | Remove personal settings (requires `gt init` again)               |
 
 All commands accept `--verbose` (`-v`) to display every git command executed.
+
+---
+
+## Interactive Conflict Resolution
+
+When `gt sync` encounters a rebase conflict, instead of stopping and printing raw git output, it launches an interactive terminal UI:
+
+```
+✖  Rebase conflict on branch feature/dev.
+
+── Resolve conflicts ──────────────────────────────────── 2 files ──
+
+  › src/api.py          (1 conflict)   [✓ theirs] ◀ ▶
+    src/utils.py        (2 conflicts)  [IDE →   ]
+
+↑↓ navigate  ·  ←→ theirs/ours  ·  ↵ open IDE  ·  c continue  ·  a abort
+
+Progress: 1 resolved  ·  1 in IDE
+[███████████████░░░░░░░░░░░░░░░] 50%
+```
+
+### Keybindings
+
+| Key       | Action                                              |
+| --------- | --------------------------------------------------- |
+| `↑` / `↓` | Navigate the file list                              |
+| `←` / `→` | Toggle between **theirs** (incoming) and **ours**   |
+| `Enter`   | Open the file in your IDE for manual editing        |
+| `c`       | Continue — apply all selections and resume rebase   |
+| `a`       | Abort — cancel and restore the original state       |
+| `Ctrl+C`  | Emergency abort — always cleans up the rebase state |
+
+### File states
+
+| State         | Meaning                                                       |
+| ------------- | ------------------------------------------------------------- |
+| `[pending]`   | Not yet decided                                               |
+| `[✓ theirs]`  | Will use the incoming version (protected branch)              |
+| `[✓ ours]`    | Will keep your version                                        |
+| `[IDE →]`     | File is open in your editor — watcher is monitoring for saves |
+| `[✓ manual]`  | Conflict markers removed in IDE — automatically detected      |
+| `[⚠ markers]` | Saved in IDE but conflict markers still present               |
+
+### IDE detection
+
+When you press `Enter` to open a file, this tool detects which IDE is hosting your terminal and opens the file there directly:
+
+| IDE                             | Detection                              | Opens with                    |
+| ------------------------------- | -------------------------------------- | ----------------------------- |
+| VS Code                         | `TERM_PROGRAM=vscode`                  | `code <file>`                 |
+| Windsurf                        | `TERM_PROGRAM=windsurf`                | `code <file>`                 |
+| Cursor                          | `TERM_PROGRAM=cursor`                  | `cursor <file>`               |
+| JetBrains (IntelliJ, WebStorm…) | `TERMINAL_EMULATOR=JetBrains-JediTerm` | platform open                 |
+| Apple Terminal / other          | fallback                               | `open` / `xdg-open` / `start` |
+
+### Real-time watcher
+
+Once a file is opened in your IDE, this tool monitors it in the background. When you save the file:
+
+- **Conflict markers removed** → state transitions to `[✓ manual]` automatically.
+- **Markers still present** → state shows `[⚠ markers]` so you know to keep editing.
+
+No need to switch back to the terminal to update the status.
+
+### Multi-commit rebases
+
+If your branch has multiple commits that each conflict, the TUI re-opens for each commit automatically until the entire rebase completes.
+
+### Safety guarantees
+
+- **Any interruption** (Ctrl+C, terminal close, unexpected error) triggers `git rebase --abort` automatically — the repository is never left in a broken state.
+- `gt merge` does **not** resolve conflicts interactively. If its internal `gt sync` step encounters a conflict, it exits with a clear error instructing you to run `gt sync` first.
+- **No silent destructive actions** — a summary and explicit confirmation are required before git operations are applied.
 
 ---
 
@@ -212,24 +287,17 @@ When Alice merges first, Bob runs `gt sync` to incorporate her changes before ru
 
 ### Rebase conflicts during `gt sync`
 
-```bash
-# 1. Fix conflicts in the affected files
-# 2. Stage resolved files
-git add <files>
-# 3. Continue the rebase
-git rebase --continue
-# 4. Run sync again to push
-gt sync
-```
+This tool handles this automatically. When a conflict is detected, the interactive TUI opens. Use `←→` to choose `theirs`/`ours`, or press `Enter` to open the file in your IDE. Press `c` to continue once all files are resolved.
+
+If you need to bail out entirely, press `a` or `Ctrl+C` — the rebase will be aborted cleanly.
 
 ### Merge simulation detects conflicts
 
-This means your branch and the protected branch have incompatible changes. Resolve on your branch, then retry:
+This means your branch and the protected branch have incompatible changes. Run `gt sync` first to resolve them interactively, then retry:
 
 ```bash
-# Fix conflicts on your branch, commit, then:
-gt sync
-gt merge
+gt sync     # resolve conflicts interactively
+gt merge    # retry the merge
 ```
 
 ### "gt is not configured for this repository"
@@ -240,11 +308,15 @@ Run the setup wizard:
 gt init
 ```
 
+### File opens in the wrong application
+
+This tool detects your IDE via the `TERM_PROGRAM` or `TERMINAL_EMULATOR` environment variable set by VS Code, Cursor, Windsurf, and JetBrains. If you are using a different terminal or editor, the file will open with the platform default (`open` on macOS, `xdg-open` on Linux, `start` on Windows).
+
 ---
 
 ## Running Tests
 
-The test suite creates real git repositories in `/tmp` and runs end-to-end. No mocks.
+The test suite creates real git repositories in a temporary directory and runs end-to-end. No mocks.
 
 ```bash
 python run_tests.py                   # run all tests
@@ -253,3 +325,15 @@ python run_tests.py -k sync           # filter by keyword
 python run_tests.py -k "merge or config"
 python run_tests.py --list            # list all test names
 ```
+
+---
+
+## Contributing
+
+Contributions are welcome. Please open an issue before submitting a pull request for significant changes.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
