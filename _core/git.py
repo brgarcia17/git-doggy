@@ -7,7 +7,9 @@ Failures raise GitError — never swallowed silently.
 """
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from . import ui
 
 
@@ -114,3 +116,132 @@ def push(remote: str, branch: str, *, force_with_lease: bool = False) -> None:
     if force_with_lease:
         cmd.append("--force-with-lease")
     _run(cmd, capture=False)
+
+
+# ── Conflict resolution ─────────────────────────────────────────────────────
+
+def repo_root() -> str:
+    """Return the absolute path to the repository root."""
+    return _run(["git", "rev-parse", "--show-toplevel"]).stdout.strip()
+
+
+def conflicted_files() -> list[dict]:
+    """
+    Return list of files with unmerged (conflicted) status.
+    Each entry: {"path": <relative_path>, "conflicts": <int>}
+    """
+    from .watcher import count_conflict_markers
+
+    r = _run(["git", "diff", "--name-only", "--diff-filter=U"], allow_fail=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        return []
+
+    root = repo_root()
+    files = []
+    for line in r.stdout.strip().splitlines():
+        rel = line.strip()
+        if not rel:
+            continue
+        abs_path = os.path.join(root, rel)
+        conflicts = count_conflict_markers(abs_path)
+        files.append({"path": rel, "abs_path": abs_path, "conflicts": conflicts})
+    return files
+
+
+def checkout_theirs(filepath: str) -> None:
+    """Resolve a conflicted file by accepting the incoming (theirs) version."""
+    _run(["git", "checkout", "--theirs", "--", filepath])
+
+
+def checkout_ours(filepath: str) -> None:
+    """Resolve a conflicted file by keeping our version."""
+    _run(["git", "checkout", "--ours", "--", filepath])
+
+
+def stage_file(filepath: str) -> None:
+    """Stage a file (git add)."""
+    _run(["git", "add", "--", filepath])
+
+
+def remove_file(filepath: str) -> None:
+    """Remove a file from the index (git rm)."""
+    _run(["git", "rm", "--", filepath], allow_fail=True)
+
+
+def rebase_continue() -> tuple[bool, str]:
+    """
+    Continue a rebase in progress.
+    Returns (success, output_message).
+    """
+    r = _run(
+        ["git", "-c", "core.editor=true", "rebase", "--continue"],
+        allow_fail=True,
+    )
+    output = ((r.stdout or "") + (r.stderr or "")).strip()
+    return r.returncode == 0, output
+
+
+def is_rebase_in_progress() -> bool:
+    """Check if there is a rebase currently in progress."""
+    root = repo_root()
+    return (
+        os.path.isdir(os.path.join(root, ".git", "rebase-merge"))
+        or os.path.isdir(os.path.join(root, ".git", "rebase-apply"))
+    )
+
+
+def detect_ide() -> str | None:
+    """
+    Detect the IDE hosting the current terminal session via environment variables.
+
+    Returns the CLI command prefix to open a file in that IDE, or None if
+    running in a plain terminal (fall back to platform default).
+
+    Priority order reflects the most specific match first.
+    """
+    term_program = os.environ.get("TERM_PROGRAM", "").lower()
+    terminal_emulator = os.environ.get("TERMINAL_EMULATOR", "").lower()
+
+    if "jetbrains" in terminal_emulator or "jeditterm" in terminal_emulator:
+        # JetBrains IDEs (IntelliJ, WebStorm, PyCharm, etc.)
+        # Use the built-in 'idea' / 'webstorm' / etc. launcher if available,
+        # otherwise fall back to platform open — JetBrains will pick it up.
+        return None  # JetBrains opens files via platform default from its own terminal
+    if term_program in ("vscode", "windsurf"):
+        return "code"  # VS Code and Windsurf both use the 'code' CLI
+    if term_program == "cursor":
+        return "cursor"
+    # Apple Terminal, iTerm2, plain terminals → no IDE-specific opener
+    return None
+
+
+def open_in_editor(filepath: str) -> None:
+    """
+    Open a file for editing, preferring the IDE that hosts this terminal.
+
+    Detection priority:
+      1. VS Code / Windsurf  → code <file>       (TERM_PROGRAM=vscode|Windsurf)
+      2. Cursor              → cursor <file>      (TERM_PROGRAM=cursor)
+      3. JetBrains           → platform default   (TERMINAL_EMULATOR=JetBrains-JediTerm)
+      4. Fallback            → open / xdg-open / start
+    """
+    ide_cmd = detect_ide()
+    if ide_cmd:
+        cmd: list[str] = [ide_cmd, filepath]
+        shell = False
+    elif sys.platform == "darwin":
+        cmd = ["open", filepath]
+        shell = False
+    elif sys.platform.startswith("linux"):
+        cmd = ["xdg-open", filepath]
+        shell = False
+    else:
+        cmd = ["start", "", filepath]
+        shell = True
+
+    subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        shell=shell,
+    )

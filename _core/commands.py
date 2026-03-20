@@ -63,18 +63,103 @@ def _rebase_onto_protected(branch: str) -> None:
     ui.info(f"Rebasing onto {target}…")
     result = g.rebase(target)
     if result.returncode != 0:
-        output = ((result.stdout or "") + (result.stderr or "")).strip()
-        ui.error(f"Rebase conflict on '{branch}'.")
-        if output:
-            print(output)
-        ui.blank()
-        ui.info("To resolve:")
-        ui.info("  1. Fix the conflicts shown above.")
-        ui.info("  2. git add <files>  →  git rebase --continue")
-        ui.info("  3. Run this command again.")
-        g.rebase_abort()
-        sys.exit(1)
+        _resolve_conflicts_interactive(branch)
+        return
     ui.detail("Rebase successful.")
+
+
+def _resolve_conflicts_interactive(branch: str) -> None:
+    """
+    Launch the interactive TUI to resolve rebase conflicts.
+    Supports multi-commit rebases: if rebase --continue triggers
+    a new conflict, the TUI is shown again.
+
+    Any interruption (Ctrl+C, exception) while a rebase is in progress
+    triggers rebase_abort automatically — no dangling rebase state.
+    """
+    from .resolver import (
+        resolve_conflicts,
+        apply_resolutions,
+        print_resolution_summary,
+        ResolverResult,
+    )
+
+    try:
+        _run_resolution_loop(branch, resolve_conflicts, apply_resolutions,
+                             print_resolution_summary, ResolverResult)
+    except KeyboardInterrupt:
+        if g.is_rebase_in_progress():
+            g.rebase_abort()
+        ui.blank()
+        ui.warn("Interrupted. Rebase aborted — no changes were made.")
+        sys.exit(130)
+    except Exception:
+        if g.is_rebase_in_progress():
+            g.rebase_abort()
+        raise
+
+
+def _run_resolution_loop(branch, resolve_conflicts, apply_resolutions,
+                         print_resolution_summary, ResolverResult) -> None:
+    """Inner resolution loop, separated so the caller can wrap it cleanly."""
+    cycle = 0
+    while True:
+        cycle += 1
+
+        resolution = resolve_conflicts(branch)
+
+        if resolution.result == ResolverResult.ABORT:
+            ui.blank()
+            if ui.confirm("Abort the rebase? All selections will be lost.", default=False):
+                g.rebase_abort()
+                ui.info("Rebase aborted. No changes were made.")
+                sys.exit(0)
+            else:
+                continue
+
+        # Show summary and ask for confirmation
+        ui.blank()
+        ui.info("Resolution summary:")
+        print_resolution_summary(resolution)
+
+        if not ui.confirm("Continue rebase with these selections?", default=True):
+            continue
+
+        # Apply the resolutions (checkout --theirs/--ours + git add)
+        apply_resolutions(resolution)
+
+        # Continue the rebase
+        success, output = g.rebase_continue()
+
+        if success:
+            if not g.is_rebase_in_progress():
+                ui.success("Rebase completed successfully.")
+                return
+            # Multi-commit rebase: check for new conflicts in next commit
+            ui.info(f"Commit {cycle} resolved. Checking next commit…")
+            new_conflicts = g.conflicted_files()
+            if new_conflicts:
+                ui.warn(f"New conflicts detected in commit {cycle + 1}.")
+                continue
+            # No new conflicts — drive it home
+            success2, _ = g.rebase_continue()
+            if success2 and not g.is_rebase_in_progress():
+                ui.success("Rebase completed successfully.")
+                return
+            elif not success2:
+                ui.warn("Additional conflicts found.")
+                continue
+            return
+        else:
+            # rebase --continue failed — likely new conflicts in next commit
+            if g.is_rebase_in_progress() and g.conflicted_files():
+                ui.warn(f"New conflicts in the next commit (cycle {cycle + 1}).")
+                continue
+            # Genuine failure
+            ui.error(f"Rebase continue failed: {output}")
+            ui.info("You can resolve manually:")
+            ui.info("  git add <files>  →  git rebase --continue")
+            sys.exit(1)
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
