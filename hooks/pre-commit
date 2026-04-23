@@ -43,6 +43,11 @@ def staged_files() -> list[str]:
     r = _run(["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"])
     return [f.strip() for f in r.stdout.splitlines() if f.strip()]
 
+def _cfg(key: str) -> str | None:
+    r = _run(["git", "config", "--local", f"gt.{key}"])
+    v = r.stdout.strip()
+    return v if r.returncode == 0 and v else None
+
 
 def check_conflict_markers(files: list[str]) -> list[str]:
     issues = []
@@ -92,11 +97,16 @@ def main() -> int:
         errors.append("  Use  git commit --no-verify  if this is intentional.")
 
     if errors:
-        print("\n✖  pre-commit blocked this commit:\n", file=sys.stderr)
+        strict = _cfg("mode") != "safe"
+        if strict:
+            print("\n✖  pre-commit blocked this commit:\n", file=sys.stderr)
+        else:
+            print("\n⚠  pre-commit warning:\n", file=sys.stderr)
+            
         for line in errors:
             print(f"   {line}", file=sys.stderr)
         print(file=sys.stderr)
-        return 1
+        return 1 if strict else 0
 
     return 0
 

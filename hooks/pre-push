@@ -95,12 +95,16 @@ def main() -> int:
                 pass  # network errors are not a reason to block
 
     if errors:
-        print("\n✖  pre-push blocked this push:\n", file=sys.stderr)
+        strict = _cfg("mode") != "safe"
+        if strict:
+            print("\n✖  pre-push blocked this push:\n", file=sys.stderr)
+        else:
+            print("\n⚠  pre-push warning:\n", file=sys.stderr)
         for err in errors:
             for part in err.split("\n"):
                 print(f"   {part}", file=sys.stderr)
             print(file=sys.stderr)
-        return 1
+        return 1 if strict else 0
 
     return 0
 

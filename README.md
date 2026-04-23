@@ -100,6 +100,8 @@ If any step fails, **nothing is written and nothing is installed**.
 gt init                # interactive setup
 gt init --dry-run      # preview without making changes
 gt init --force        # skip the confirmation prompt
+gt init --mode safe    # install hooks in non-blocking mode (warnings only) [default]
+gt init --mode strict  # install hooks in blocking mode (aborts invalid actions)
 gt init --uninstall    # remove hooks and config from this repo
 gt init --repo PATH    # target a different repository
 ```
@@ -259,6 +261,8 @@ The following hooks are installed automatically by `gt init`:
 | **pre-commit**    | Blocks commits containing git conflict markers (`<<<<<<<`). Blocks commits of sensitive files (`.env`, `id_rsa`, `credentials.json`, etc.). |
 | **post-checkout** | Warns when switching to the protected branch. Warns when your branch is behind the protected branch.                                        |
 | **pre-rebase**    | Blocks rebasing the protected branch directly. Warns when rebasing onto a non-standard base.                                                |
+
+> **Note**: By default, hooks are installed in **safe** mode, which means they will only output warnings. To enforce the blocking behavior described above, initialize with `gt init --mode strict`.
 
 `gt merge` is the **only** path to push to the protected branch. It sets `GT_BYPASS_HOOK=1` internally to allow its own controlled push through the pre-push hook.
 

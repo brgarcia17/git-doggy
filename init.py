@@ -49,6 +49,7 @@ _CFG = {
     "develop_branch":   "develop-branch",
     "protected_branch": "protected-branch",
     "remote":           "remote",
+    "mode":             "mode",
 }
 
 
@@ -260,6 +261,8 @@ def main() -> None:
     parser.add_argument("--dry-run",    action="store_true")
     parser.add_argument("--force", "-f", action="store_true")
     parser.add_argument("--uninstall",  action="store_true")
+    parser.add_argument("--mode", choices=["safe", "strict"], default=argparse.SUPPRESS,
+                        help="Hook behavior mode (default: safe)")
     parser.add_argument(
         "--repo", metavar="PATH", default=".",
         help="Target repository (default: current directory)",
@@ -314,6 +317,14 @@ def main() -> None:
             sys.exit(1)
 
     _step("Step 4 — Saving config")
+    
+    # Preserve existing mode if not explicitly provided
+    if hasattr(args, "mode"):
+        cfg["mode"] = args.mode
+    else:
+        existing_mode = _run(["git", "config", "--local", "gt.mode"]).stdout.strip()
+        cfg["mode"] = existing_mode if existing_mode in ("safe", "strict") else "safe"
+        
     if not args.dry_run:
         failed = [k for k, v in cfg.items() if not _cfg_write(k, v)]
         if failed:
