@@ -46,12 +46,21 @@ def main() -> int:
     ).stdout.strip()
 
     if branch == protected:
-        print(
-            f"\n✖  Rebasing '{protected}' directly is not allowed.\n"
-            f"   '{protected}' is managed exclusively by:  gt merge\n",
-            file=sys.stderr,
-        )
-        return 1
+        strict = _cfg("mode") != "safe"
+        if strict:
+            print(
+                f"\n✖  Rebasing '{protected}' directly is not allowed.\n"
+                f"   '{protected}' is managed exclusively by:  gt merge\n",
+                file=sys.stderr,
+            )
+            return 1
+        else:
+            print(
+                f"\n⚠  Rebasing '{protected}' directly is not recommended.\n"
+                f"   '{protected}' is usually managed by:  gt merge\n",
+                file=sys.stderr,
+            )
+            return 0
 
     if upstream:
         allowed = {f"{remote}/{protected}", protected}

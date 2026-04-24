@@ -59,13 +59,13 @@ def main() -> None:
         _build_parser().print_help()
         sys.exit(0)
 
-    args = _build_parser().parse_args()
+    args, extra = _build_parser().parse_known_args()
 
     # `init` is handled by init.py and does not need the config module loaded.
     if args.command == "init":
         import subprocess
         init_script = Path(__file__).parent / "init.py"
-        sys.exit(subprocess.call([sys.executable, str(init_script)]))
+        sys.exit(subprocess.call([sys.executable, str(init_script)] + extra))
 
     # All other commands import from _core, which loads config at import time.
     # If config is missing, _core/config.py exits with code 2 and a clear message.

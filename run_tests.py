@@ -79,10 +79,10 @@ def gt(args: list[str], *, cwd: Path, stdin: str = "",
 
 
 def init_gt(*, cwd: Path, develop: str, protected: str,
-            remote: str = "origin", verbose: bool = False) -> subprocess.CompletedProcess:
+            remote: str = "origin", verbose: bool = False, mode: str = "strict") -> subprocess.CompletedProcess:
     stdin = f"{develop}\n{protected}\n{remote}\ny\n"
     result = run(
-        [PYTHON, str(INIT)],
+        [PYTHON, str(INIT), "--mode", mode],
         cwd=cwd, stdin=stdin,
     )
     if verbose:
@@ -353,6 +353,28 @@ def _(verbose):
         repo.cleanup()
 
 
+@test("pre_push_warns_but_allows_direct_push_in_safe_mode")
+def _(verbose):
+    """pre-push hook warns but allows direct push to protected branch in safe mode."""
+    repo = Repo()
+    try:
+        dev = repo.clone()
+        repo.bootstrap(dev, "pre-release", "demo/dev")
+        git(["checkout", "-q", "demo/dev"], cwd=dev)
+        init_gt(cwd=dev, develop="demo/dev", protected="pre-release", verbose=verbose, mode="safe")
+
+        git(["checkout", "-q", "pre-release"], cwd=dev)
+        (dev / "bad.txt").write_text("bad\n")
+        git(["add", "."], cwd=dev)
+        git(["commit", "-q", "-m", "bad: direct"], cwd=dev)
+
+        r = git(["push", "origin", "pre-release"], cwd=dev)
+        assert_ok(r, label="direct push to protected in safe mode")
+        assert_in("pre-push warning", r.stdout + r.stderr)
+    finally:
+        repo.cleanup()
+
+
 @test("pre_push_bypass_allows_gt_merge_push")
 def _(verbose):
     """GT_BYPASS_HOOK=1 allows gt merge to push to the protected branch."""
@@ -506,6 +528,26 @@ def _(verbose):
         r = git(["commit", "-m", "bad: conflict markers"], cwd=dev)
         assert_fail(r, label="commit with conflict markers")
         assert_in("Conflict markers", r.stdout + r.stderr)
+    finally:
+        repo.cleanup()
+
+
+@test("pre_commit_warns_but_allows_conflict_markers_in_safe_mode")
+def _(verbose):
+    """pre-commit hook warns but allows commits with git conflict markers in safe mode."""
+    repo = Repo()
+    try:
+        dev = repo.clone()
+        repo.bootstrap(dev, "pre-release", "demo/dev")
+        git(["checkout", "-q", "demo/dev"], cwd=dev)
+        init_gt(cwd=dev, develop="demo/dev", protected="pre-release", verbose=verbose, mode="safe")
+
+        (dev / "bad.txt").write_text("<<<<<<< HEAD\ncode\n=======\nother\n>>>>>>> branch\n")
+        git(["add", "bad.txt"], cwd=dev)
+
+        r = git(["commit", "-m", "bad: conflict markers"], cwd=dev)
+        assert_ok(r, label="commit with conflict markers in safe mode")
+        assert_in("pre-commit warning", r.stdout + r.stderr)
     finally:
         repo.cleanup()
 
